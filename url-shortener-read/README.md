@@ -15,6 +15,8 @@ This service does not create or modify mappings. Schema is owned by the write se
 - Go 1.25
 - Gin
 - PostgreSQL via `database/sql` and [pgx](https://github.com/jackc/pgx)
+- MongoDB for append-only audit events
+- slog JSON logs
 - `godotenv` for local configuration
 
 ## Layout
@@ -25,6 +27,8 @@ database/           connection pool
 internal/config/    environment configuration
 internal/dto/       request types
 internal/handler/   HTTP adapters
+internal/obs/       slog and request-id middleware
+internal/audit/     async Mongo event writer
 internal/model/     domain model
 internal/repository persistence (read-only)
 internal/service/   code validation and lookup
@@ -40,17 +44,20 @@ Copy `.env.example` to `.env` and adjust as needed:
 
 | Variable | Description                                      | Default  |
 |----------|--------------------------------------------------|----------|
-| `PORT`   | HTTP listen port                                 | `8081`   |
-| `DSN`    | PostgreSQL connection string (Compose publishes Postgres on host port **5433**) | required |
+| `PORT`             | HTTP listen port                                 | `8081`   |
+| `DSN`              | PostgreSQL connection string (Compose publishes Postgres on host port **5433**) | required |
+| `MONGO_URI`        | MongoDB connection string (Compose publishes Mongo on host port **27018**) | optional |
+| `MONGO_DB`         | Audit database name                              | `urlshortener` |
+| `MONGO_COLLECTION` | Audit collection name                            | `events` |
 
 The DSN must point at the same database the write service uses.
 
 ## Run locally
 
-From the repository root, start PostgreSQL:
+From the repository root, start PostgreSQL and MongoDB:
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres mongo
 ```
 
 Start the write service first so the schema exists, then from `url-shortener-read`:
@@ -97,6 +104,12 @@ Typical headers:
 HTTP/1.1 302 Found
 Location: https://example.com/docs
 ```
+
+If `MONGO_URI` is unset or Mongo is unreachable, redirects still succeed. Audit events are dropped until Mongo is available.
+
+## Observability
+
+Each request gets an `X-Request-ID`. Access logs are JSON on stdout. Resolve attempts are appended asynchronously to Mongo (`urlshortener.events`) and must not delay the 302.
 
 ## Tests
 

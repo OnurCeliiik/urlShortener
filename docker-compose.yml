@@ -16,5 +16,19 @@ services:
       timeout: 5s
       retries: 5
 
+  mongo:
+    image: mongo:7
+    container_name: urlshortener-mongo
+    ports:
+      - "27018:27017"
+    volumes:
+      - urlshortener_mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   urlshortener_pgdata:
+  urlshortener_mongodata:

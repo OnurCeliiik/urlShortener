@@ -2,10 +2,13 @@ package handler
 
 import (
 	"OnurCeliiik/urlShortener-write/internal/apperr"
+	"OnurCeliiik/urlShortener-write/internal/audit"
 	"OnurCeliiik/urlShortener-write/internal/dto"
+	"OnurCeliiik/urlShortener-write/internal/obs"
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -16,15 +19,20 @@ type ShortenService interface {
 
 type ShortenHandler struct {
 	service ShortenService
+	audit   *audit.Emitter
 }
 
-func NewShortenHandler(service ShortenService) *ShortenHandler {
-	return &ShortenHandler{service: service}
+func NewShortenHandler(service ShortenService, auditor *audit.Emitter) *ShortenHandler {
+	return &ShortenHandler{
+		service: service,
+		audit:   auditor,
+	}
 }
 
 func (h *ShortenHandler) Shorten(c *gin.Context) {
 	var req dto.ShortenURLRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		h.emit(c, http.StatusBadRequest, req.ShortCode, req.OriginalURL, "invalid JSON body")
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON body"})
 		return
 	}
@@ -35,6 +43,7 @@ func (h *ShortenHandler) Shorten(c *gin.Context) {
 	})
 	if err != nil {
 		status, msg := mapError(err)
+		h.emit(c, status, req.ShortCode, req.OriginalURL, msg)
 		c.JSON(status, gin.H{"error": msg})
 		return
 	}
@@ -43,7 +52,24 @@ func (h *ShortenHandler) Shorten(c *gin.Context) {
 	if created {
 		status = http.StatusCreated
 	}
+	h.emit(c, status, resp.ShortCode, resp.OriginalURL, "")
 	c.JSON(status, resp)
+}
+
+func (h *ShortenHandler) emit(c *gin.Context, status int, shortCode, originalURL, errMsg string) {
+	h.audit.Emit(audit.Event{
+		Timestamp:   time.Now().UTC(),
+		Service:     "write",
+		Action:      "shorten",
+		ShortCode:   shortCode,
+		OriginalURL: originalURL,
+		Status:      status,
+		LatencyMS:   obs.ElapsedMS(c),
+		RequestID:   obs.RequestIDFrom(c),
+		Method:      c.Request.Method,
+		Path:        c.Request.URL.Path,
+		Error:       errMsg,
+	})
 }
 
 func mapError(err error) (int, string) {

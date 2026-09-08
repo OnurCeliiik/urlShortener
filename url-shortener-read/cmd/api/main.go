@@ -2,13 +2,15 @@ package main
 
 import (
 	"OnurCeliiik/urlShortener-read/database"
+	"OnurCeliiik/urlShortener-read/internal/audit"
 	"OnurCeliiik/urlShortener-read/internal/config"
 	"OnurCeliiik/urlShortener-read/internal/handler"
+	"OnurCeliiik/urlShortener-read/internal/obs"
 	"OnurCeliiik/urlShortener-read/internal/repository"
 	"OnurCeliiik/urlShortener-read/internal/service"
 	"OnurCeliiik/urlShortener-read/routes"
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,29 +22,51 @@ import (
 )
 
 func main() {
+	logger := obs.NewLogger("read")
+	slog.SetDefault(logger)
+
 	if err := godotenv.Load(); err != nil {
-		log.Println("no .env file found, using environment variables")
+		logger.Info("no .env file found, using environment variables")
 	}
 
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		logger.Error("failed to load config", "err", err)
+		os.Exit(1)
 	}
 
 	db, err := database.NewDB(cfg.DSN)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		logger.Error("failed to connect to database", "err", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
+	auditor := audit.Noop()
+	if cfg.MongoURI != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		connected, err := audit.Connect(ctx, cfg.MongoURI, cfg.MongoDB, cfg.MongoColl, logger)
+		cancel()
+		if err != nil {
+			logger.Warn("audit store unavailable, continuing without Mongo events", "err", err)
+		} else {
+			auditor = connected
+			logger.Info("audit store connected", "db", cfg.MongoDB, "collection", cfg.MongoColl)
+		}
+	}
+	defer auditor.Close()
+
 	repo := repository.NewResolveRepository(db)
 	svc := service.NewResolveService(repo)
-	h := handler.NewResolveHandler(svc)
+	h := handler.NewResolveHandler(svc, auditor)
 
-	router := gin.Default()
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	router.Use(gin.Recovery())
 	routes.SetupRoutes(router, &routes.Dependencies{
 		ResolveHandler: h,
 		DB:             db,
+		Logger:         logger,
 	})
 
 	server := &http.Server{
@@ -55,9 +79,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("read service listening on %s", server.Addr)
+		logger.Info("listening", "addr", server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("failed to start reader server: %v", err)
+			logger.Error("failed to start reader server", "err", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -69,6 +94,7 @@ func main() {
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("server shutdown: %v", err)
+		logger.Error("server shutdown", "err", err)
+		os.Exit(1)
 	}
 }

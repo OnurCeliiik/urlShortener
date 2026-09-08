@@ -2,14 +2,16 @@ package main
 
 import (
 	"OnurCeliiik/urlShortener-write/database"
+	"OnurCeliiik/urlShortener-write/internal/audit"
 	"OnurCeliiik/urlShortener-write/internal/config"
 	"OnurCeliiik/urlShortener-write/internal/handler"
+	"OnurCeliiik/urlShortener-write/internal/obs"
 	"OnurCeliiik/urlShortener-write/internal/repository"
 	"OnurCeliiik/urlShortener-write/internal/service"
 	"OnurCeliiik/urlShortener-write/migrations"
 	"OnurCeliiik/urlShortener-write/routes"
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,33 +23,56 @@ import (
 )
 
 func main() {
+	logger := obs.NewLogger("write")
+	slog.SetDefault(logger)
+
 	if err := godotenv.Load(); err != nil {
-		log.Println("no .env file found, using environment variables")
+		logger.Info("no .env file found, using environment variables")
 	}
 
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		logger.Error("failed to load config", "err", err)
+		os.Exit(1)
 	}
 
 	db, err := database.NewDB(cfg.DSN)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v", err)
+		logger.Error("failed to connect to database", "err", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
 	if err := database.Migrate(db, migrations.SQL); err != nil {
-		log.Fatalf("failed to run migrations: %v", err)
+		logger.Error("failed to run migrations", "err", err)
+		os.Exit(1)
 	}
+
+	auditor := audit.Noop()
+	if cfg.MongoURI != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		connected, err := audit.Connect(ctx, cfg.MongoURI, cfg.MongoDB, cfg.MongoColl, logger)
+		cancel()
+		if err != nil {
+			logger.Warn("audit store unavailable, continuing without Mongo events", "err", err)
+		} else {
+			auditor = connected
+			logger.Info("audit store connected", "db", cfg.MongoDB, "collection", cfg.MongoColl)
+		}
+	}
+	defer auditor.Close()
 
 	repo := repository.NewShortenRepository(db)
 	svc := service.NewShortenService(repo, cfg.BaseURL)
-	h := handler.NewShortenHandler(svc)
+	h := handler.NewShortenHandler(svc, auditor)
 
-	router := gin.Default()
+	gin.SetMode(gin.ReleaseMode)
+	router := gin.New()
+	router.Use(gin.Recovery())
 	routes.SetupRoutes(router, &routes.Dependencies{
 		ShortenHandler: h,
 		DB:             db,
+		Logger:         logger,
 	})
 
 	server := &http.Server{
@@ -60,9 +85,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("write service listening on %s", server.Addr)
+		logger.Info("listening", "addr", server.Addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("failed to start writer server: %v", err)
+			logger.Error("failed to start writer server", "err", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -74,6 +100,7 @@ func main() {
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Fatalf("server shutdown: %v", err)
+		logger.Error("server shutdown", "err", err)
+		os.Exit(1)
 	}
 }

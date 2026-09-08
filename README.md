@@ -2,7 +2,7 @@
 
 A URL shortening system split into independent **write** and **read** services. The write service records mappings from a short code to an original URL. The read service looks those mappings up and redirects clients.
 
-The two sides share PostgreSQL as the source of truth. Reads can later sit behind a cache without changing how mappings are created.
+The two sides share PostgreSQL as the source of truth. Request activity is written as JSON logs to stdout and as append-only events to MongoDB. Mongo is not on the redirect critical path: if it is down, shorten and redirect still succeed.
 
 ## Architecture
 
@@ -12,9 +12,12 @@ The system follows a CQRS-style split:
 Client
   │
   ├─ POST /shorten ──► write service ──► PostgreSQL
+  │                         │
+  │                         └── slog + Mongo events (async)
   │
   └─ GET  /:code   ──► read service  ──► PostgreSQL
                               │
+                              ├── slog + Mongo events (async)
                               └── 302 Location: original URL
 ```
 
@@ -30,7 +33,9 @@ Both services speak to the same `urls` table (`short_code`, `original_url`, `cre
 |-----------------|---------------------------------------------|
 | Language        | Go                                          |
 | HTTP            | Gin                                         |
-| Database        | PostgreSQL                                  |
+| Database        | PostgreSQL (mappings)                       |
+| Audit store     | MongoDB (request events)                    |
+| Logging         | slog JSON to stdout                         |
 | DB driver       | pgx (`database/sql` stdlib adapter)         |
 | Local database  | Docker Compose                              |
 | Config          | Environment variables (`.env` for local)    |
@@ -40,7 +45,7 @@ Both services speak to the same `urls` table (`short_code`, `original_url`, `cre
 ```
 url-shortener-write/   command API (create mappings) — port 8080
 url-shortener-read/    query/redirect API — port 8081
-docker-compose.yml     local PostgreSQL
+docker-compose.yml     local PostgreSQL and MongoDB
 ```
 
 - Write service: [url-shortener-write/README.md](url-shortener-write/README.md)
@@ -53,14 +58,26 @@ docker-compose.yml     local PostgreSQL
 - Short codes are 4–10 alphanumeric characters. Generated codes are 7 characters.
 - Clients may supply a custom code or leave it empty and let the write service generate one.
 
-## Local PostgreSQL
+## Local infrastructure
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres mongo
 ```
 
-Default connection:
+PostgreSQL:
 
 ```
 postgres://shortener:shortener@localhost:5433/urlshortener?sslmode=disable
+```
+
+MongoDB (events collection `urlshortener.events`):
+
+```
+mongodb://localhost:27018
+```
+
+Inspect recent events:
+
+```bash
+docker compose exec mongo mongosh urlshortener --quiet --eval 'db.events.find().sort({ts:-1}).limit(10)'
 ```

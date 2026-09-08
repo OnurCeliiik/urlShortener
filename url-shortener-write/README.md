@@ -16,6 +16,8 @@ This service does not perform redirects.
 - Go 1.25
 - Gin
 - PostgreSQL via `database/sql` and [pgx](https://github.com/jackc/pgx)
+- MongoDB for append-only audit events
+- slog JSON logs
 - `godotenv` for local configuration
 
 ## Layout
@@ -27,6 +29,8 @@ migrations/         SQL schema
 internal/config/    environment configuration
 internal/dto/       request and response types
 internal/handler/   HTTP adapters
+internal/obs/       slog and request-id middleware
+internal/audit/     async Mongo event writer
 internal/model/     domain model
 internal/repository persistence
 internal/service/   validation, code generation, mapping rules
@@ -42,18 +46,21 @@ Copy `.env.example` to `.env` and adjust as needed:
 
 | Variable   | Description                                      | Default                     |
 |------------|--------------------------------------------------|-----------------------------|
-| `PORT`     | HTTP listen port                                 | `8080`                      |
-| `DSN`      | PostgreSQL connection string (Compose publishes Postgres on host port **5433**) | required |
-| `BASE_URL` | Public origin of the read/redirect service, used to build `short_url` values | `http://localhost:$PORT`    |
+| `PORT`              | HTTP listen port                                 | `8080`                      |
+| `DSN`               | PostgreSQL connection string (Compose publishes Postgres on host port **5433**) | required |
+| `BASE_URL`          | Public origin of the read/redirect service, used to build `short_url` values | `http://localhost:$PORT`    |
+| `MONGO_URI`         | MongoDB connection string (Compose publishes Mongo on host port **27018**) | optional |
+| `MONGO_DB`          | Audit database name                              | `urlshortener`              |
+| `MONGO_COLLECTION`  | Audit collection name                            | `events`                    |
 
 `BASE_URL` should be the read service origin (default `http://localhost:8081`).
 
 ## Run locally
 
-From the repository root, start PostgreSQL:
+From the repository root, start PostgreSQL and MongoDB:
 
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres mongo
 ```
 
 Then from `url-shortener-write`:
@@ -133,6 +140,14 @@ curl -sS -X POST http://localhost:8080/shorten \
   -H 'Content-Type: application/json' \
   -d '{"original_url":"https://example.com/docs","short_code":"docs42"}'
 ```
+
+If `MONGO_URI` is unset or Mongo is unreachable, the service still serves requests. Audit events are dropped until Mongo is available.
+
+## Observability
+
+Each request gets an `X-Request-ID` (accepted from the client or generated). Access logs are JSON on stdout (`service`, `request_id`, `method`, `path`, `status`, `latency_ms`).
+
+Shorten attempts are also appended asynchronously to Mongo (`urlshortener.events`). A full or slow audit store never blocks `POST /shorten`.
 
 ## Tests
 
