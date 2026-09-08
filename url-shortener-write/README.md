@@ -44,9 +44,9 @@ Copy `.env.example` to `.env` and adjust as needed:
 |------------|--------------------------------------------------|-----------------------------|
 | `PORT`     | HTTP listen port                                 | `8080`                      |
 | `DSN`      | PostgreSQL connection string (Compose publishes Postgres on host port **5433**) | required |
-| `BASE_URL` | Public origin used to build `short_url` values   | `http://localhost:$PORT`    |
+| `BASE_URL` | Public origin of the read/redirect service, used to build `short_url` values | `http://localhost:$PORT`    |
 
-`BASE_URL` should be the host that will later serve redirects (the read service). Until that exists, it can point at any public origin you want returned to clients.
+`BASE_URL` should be the read service origin (default `http://localhost:8081`).
 
 ## Run locally
 
@@ -95,7 +95,7 @@ Create or reuse a mapping.
 ```json
 {
   "short_code": "docs42",
-  "short_url": "http://localhost:8080/docs42",
+  "short_url": "http://localhost:8081/docs42",
   "original_url": "https://example.com/very/long/path"
 }
 ```
